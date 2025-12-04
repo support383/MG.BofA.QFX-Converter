@@ -233,26 +233,9 @@ if uploaded_file:
         with st.spinner("Parsing file..."):
             df = parse_bofa_file(uploaded_file)
         
-        st.success(f"✅ File parsed successfully! Found {len(df)} rows.")
-        
-        # Show preview
-        with st.expander("Preview Data", expanded=True):
-            st.dataframe(df.head(10), use_container_width=True)
-        
-        # Show column names for debugging
-        with st.expander("Detected Columns"):
-            st.write(list(df.columns))
-        
-        # Account type selector
-        account_type = st.selectbox(
-            "Select Account Type",
-            options=["CHECKING", "SAVINGS", "CREDITCARD"],
-            index=0
-        )
-        
-        # Convert to QFX
+        # Convert to QFX (default to CHECKING)
         with st.spinner("Converting to QFX..."):
-            qfx_content, transaction_count, skipped_rows = convert_to_qfx(df, account_type)
+            qfx_content, transaction_count, skipped_rows = convert_to_qfx(df, 'CHECKING')
         
         st.success(f"✅ Converted {transaction_count} transactions to QFX format!")
         
