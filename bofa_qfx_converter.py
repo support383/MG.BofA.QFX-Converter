@@ -5,12 +5,21 @@ from datetime import datetime
 
 def detect_delimiter(sample):
     """Detect the delimiter used in CSV file"""
-    if '\t' in sample:
+    # Count occurrences of potential delimiters
+    tab_count = sample.count('\t')
+    semicolon_count = sample.count(';')
+    comma_count = sample.count(',')
+    
+    # Prioritize tab if it appears multiple times (BofA uses tabs)
+    if tab_count > 5:
         return '\t'
-    elif ';' in sample:
+    elif semicolon_count > comma_count:
         return ';'
-    else:
+    elif comma_count > tab_count and tab_count == 0:
         return ','
+    else:
+        # Default to tab for BofA files
+        return '\t'
 
 def find_transaction_header(df):
     """Find the row containing transaction column headers"""
@@ -18,10 +27,14 @@ def find_transaction_header(df):
         row_str = row.astype(str).str.strip()
         row_lower = row_str.str.lower().tolist()
         
-        # Look for a row that has "date" in first column and "amount" somewhere
-        # This avoids matching summary rows
-        if (row_lower[0] == "date" or "date" in row_lower[0]) and \
-           any("amount" in col and "summary" not in col for col in row_lower):
+        # Look for a row that starts with "date" and has "amount" 
+        # Count how many expected columns we find
+        has_date = any('date' in str(col).lower() for col in row_lower[:2])  # Date should be in first 2 columns
+        has_amount = any('amount' in str(col).lower() and 'summary' not in str(col).lower() for col in row_lower)
+        has_description = any('description' in str(col).lower() for col in row_lower)
+        
+        # Need at least date and amount to be a valid header
+        if has_date and has_amount:
             return i
     return None
 
