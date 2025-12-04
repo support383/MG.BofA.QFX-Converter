@@ -3,41 +3,6 @@ import pandas as pd
 import io
 from datetime import datetime
 
-def detect_delimiter(sample):
-    """Detect the delimiter used in CSV file"""
-    # Count occurrences of potential delimiters
-    tab_count = sample.count('\t')
-    semicolon_count = sample.count(';')
-    comma_count = sample.count(',')
-    
-    # Prioritize tab if it appears multiple times (BofA uses tabs)
-    if tab_count > 5:
-        return '\t'
-    elif semicolon_count > comma_count:
-        return ';'
-    elif comma_count > tab_count and tab_count == 0:
-        return ','
-    else:
-        # Default to tab for BofA files
-        return '\t'
-
-def find_transaction_header(df):
-    """Find the row containing transaction column headers"""
-    for i, row in df.iterrows():
-        row_str = row.astype(str).str.strip()
-        row_lower = row_str.str.lower().tolist()
-        
-        # Look for a row that starts with "date" and has "amount" 
-        # Count how many expected columns we find
-        has_date = any('date' in str(col).lower() for col in row_lower[:2])  # Date should be in first 2 columns
-        has_amount = any('amount' in str(col).lower() and 'summary' not in str(col).lower() for col in row_lower)
-        has_description = any('description' in str(col).lower() for col in row_lower)
-        
-        # Need at least date and amount to be a valid header
-        if has_date and has_amount:
-            return i
-    return None
-
 def parse_bofa_file(file):
     """Parse BofA CSV or Excel file"""
     file_type = file.name.split('.')[-1].lower()
@@ -45,21 +10,24 @@ def parse_bofa_file(file):
     # Handle Excel files
     if file_type in ['xls', 'xlsx']:
         try:
-            # Try reading Excel file
             raw_df = pd.read_excel(file, header=None)
-            header_row_index = find_transaction_header(raw_df)
+            
+            # Find header row
+            header_row_index = None
+            for i, row in raw_df.iterrows():
+                row_lower = row.astype(str).str.lower().tolist()
+                if 'date' in row_lower and 'amount' in row_lower:
+                    header_row_index = i
+                    break
             
             if header_row_index is None:
-                raise ValueError("Could not find the transaction header row in the Excel file.")
+                raise ValueError("Could not find header row with 'Date' and 'Amount' columns")
             
             # Re-read with proper header
             file.seek(0)
             df = pd.read_excel(file, skiprows=header_row_index)
             df.columns = [str(col).strip().lower().replace(" ", "_") for col in df.columns]
-            
-            # Remove any rows that are completely empty
             df = df.dropna(how='all')
-            
             return df
             
         except Exception as e:
@@ -69,42 +37,54 @@ def parse_bofa_file(file):
     else:
         content = file.read().decode("utf-8", errors="ignore")
         
-        # Clean up the content by removing empty lines with just tabs
+        # Split into lines and find the header
         lines = content.split('\n')
-        cleaned_lines = []
-        for line in lines:
-            # Skip lines that are only whitespace/tabs
-            if line.strip():
-                cleaned_lines.append(line)
+        header_line_index = None
         
-        content = '\n'.join(cleaned_lines)
+        for i, line in enumerate(lines):
+            line_lower = line.lower()
+            # Look for line with Date, Description, Amount
+            if 'date' in line_lower and 'amount' in line_lower and 'summary' not in line_lower:
+                header_line_index = i
+                break
         
-        delimiter = detect_delimiter(content[:500])
-        buffer = io.StringIO(content)
+        if header_line_index is None:
+            raise ValueError("Could not find the transaction header row (looking for 'Date' and 'Amount' columns)")
+        
+        # Get all lines from header onwards
+        data_lines = lines[header_line_index:]
+        
+        # Detect delimiter from header line
+        header_line = data_lines[0]
+        if header_line.count('\t') >= 2:
+            delimiter = '\t'
+        elif header_line.count(';') > header_line.count(','):
+            delimiter = ';'
+        else:
+            delimiter = ','
+        
+        # Reconstruct content from header onwards
+        data_content = '\n'.join(data_lines)
         
         try:
-            # Read with on_bad_lines='skip' to skip problematic rows
-            raw_df = pd.read_csv(buffer, delimiter=delimiter, header=None, 
-                                skip_blank_lines=True, on_bad_lines='skip')
+            df = pd.read_csv(
+                io.StringIO(data_content),
+                delimiter=delimiter,
+                thousands=',',  # Handle numbers like 1,695.01
+                on_bad_lines='skip'
+            )
+            
+            # Clean column names
+            df.columns = [str(col).strip().lower().replace(" ", "_") for col in df.columns]
+            
+            # Remove empty rows and unnamed columns
+            df = df.dropna(how='all')
+            df = df.loc[:, ~df.columns.str.contains('^unnamed', case=False, na=False)]
+            
+            return df
+            
         except Exception as e:
-            raise ValueError(f"Unable to read CSV file: {str(e)}")
-        
-        header_row_index = find_transaction_header(raw_df)
-        if header_row_index is None:
-            raise ValueError("Could not find the transaction header row in the CSV file. Please ensure this is a valid Bank of America export.")
-        
-        # Re-read from the header row onwards, skipping bad lines
-        df = pd.read_csv(io.StringIO(content), delimiter=delimiter, 
-                        skiprows=header_row_index, on_bad_lines='skip')
-        df.columns = [str(col).strip().lower().replace(" ", "_") for col in df.columns]
-        
-        # Remove any rows that are completely empty or summary rows
-        df = df.dropna(how='all')
-        
-        # Remove any unnamed columns that are empty
-        df = df.loc[:, ~df.columns.str.contains('^unnamed', case=False) | df.notna().any()]
-        
-        return df
+            raise ValueError(f"Unable to parse CSV data: {str(e)}")
 
 def convert_to_qfx(df, account_type='CHECKING'):
     """Convert DataFrame to QFX format"""
@@ -166,33 +146,31 @@ def convert_to_qfx(df, account_type='CHECKING'):
     
     for i, row in df.iterrows():
         try:
-            # Try different possible date column names
+            # Get date
             date_value = row.get("date") or row.get("posted_date") or row.get("transaction_date")
             if pd.isna(date_value) or date_value == '':
                 continue
             
-            # Skip rows that look like summaries
-            if isinstance(date_value, str) and any(word in str(date_value).lower() 
-                for word in ["beginning", "ending", "balance", "total", "summary"]):
+            # Skip summary rows
+            date_str_lower = str(date_value).lower()
+            if any(word in date_str_lower for word in ["beginning", "ending", "balance", "total", "summary"]):
                 continue
                 
             date = pd.to_datetime(date_value, errors='coerce')
             if pd.isna(date):
-                skipped_rows.append(f"Row {i+1}: Invalid date")
+                skipped_rows.append(f"Row {i+1}: Invalid date '{date_value}'")
                 continue
             
             date_str = date.strftime('%Y%m%d')
             
-            # Get amount (try different possible column names)
+            # Get amount
             amount_value = row.get("amount") or row.get("transaction_amount")
             if pd.isna(amount_value) or amount_value == '':
-                skipped_rows.append(f"Row {i+1}: Missing amount")
                 continue
             
-            # Clean and convert amount
+            # Clean and convert amount (handle commas)
             amount_str = str(amount_value).replace(",", "").replace("$", "").strip()
             if amount_str == '' or amount_str == 'nan':
-                skipped_rows.append(f"Row {i+1}: Empty amount")
                 continue
                 
             amount = float(amount_str)
@@ -204,7 +182,7 @@ def convert_to_qfx(df, account_type='CHECKING'):
             if any(word in name.lower() for word in ["beginning balance", "ending balance", "total credits", "total debits"]):
                 continue
             
-            memo = str(row.get("memo") or row.get("description") or name).strip()
+            memo = str(row.get("memo") or name).strip()
             
             # Determine transaction type
             trntype = "DEBIT" if amount < 0 else "CREDIT"
@@ -281,7 +259,7 @@ if uploaded_file:
         # Show skipped rows if any
         if skipped_rows and len(skipped_rows) > 0:
             with st.expander(f"⚠️ Skipped {len(skipped_rows)} rows"):
-                for skip in skipped_rows[:10]:  # Show first 10
+                for skip in skipped_rows[:10]:
                     st.text(skip)
                 if len(skipped_rows) > 10:
                     st.text(f"... and {len(skipped_rows) - 10} more")
@@ -300,4 +278,5 @@ if uploaded_file:
         
         # Show detailed error for debugging
         with st.expander("Show detailed error"):
-            st.code(str(e))
+            import traceback
+            st.code(traceback.format_exc())
