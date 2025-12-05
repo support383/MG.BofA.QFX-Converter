@@ -220,7 +220,7 @@ def convert_to_qfx(df, account_type='CHECKING'):
 # Streamlit UI
 st.set_page_config(page_title="BofA to QFX Converter", layout="centered")
 st.title("🏦 Convert Bank of America to QFX")
-st.markdown("Upload a BofA file (CSV or Excel) to convert it to QFX format for import into MoneyGrit or Quicken.")
+st.markdown("Upload a BofA file (CSV or Excel) to convert it to QFX format for import into MoneyGrit.")
 
 uploaded_file = st.file_uploader(
     "Upload a Bank of America CSV or Excel file", 
