@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import io
+import hashlib
 from datetime import datetime
 
 def parse_bofa_file(file):
@@ -184,6 +185,12 @@ def convert_to_qfx(df, account_type='CHECKING'):
             
             memo = str(row.get("memo") or name).strip()
             
+            # Create unique FITID based on transaction details
+            # Include more fields to handle edge cases of identical transactions
+            running_bal = str(row.get("running_bal.") or row.get("running_bal") or "")
+            fitid_string = f"{date_str}{amount:.2f}{name[:50]}{running_bal}"
+            fitid = hashlib.md5(fitid_string.encode()).hexdigest()[:16]
+            
             # Determine transaction type
             trntype = "DEBIT" if amount < 0 else "CREDIT"
             
@@ -191,7 +198,7 @@ def convert_to_qfx(df, account_type='CHECKING'):
             qfx.append(f"            <TRNTYPE>{trntype}</TRNTYPE>")
             qfx.append(f"            <DTPOSTED>{date_str}</DTPOSTED>")
             qfx.append(f"            <TRNAMT>{amount:.2f}</TRNAMT>")
-            qfx.append(f"            <FITID>{transaction_count+1}</FITID>")
+            qfx.append(f"            <FITID>{fitid}</FITID>")
             qfx.append(f"            <NAME>{name[:32]}</NAME>")
             qfx.append(f"            <MEMO>{memo[:255]}</MEMO>")
             qfx.append("          </STMTTRN>")
@@ -220,7 +227,7 @@ def convert_to_qfx(df, account_type='CHECKING'):
 # Streamlit UI
 st.set_page_config(page_title="BofA to QFX Converter", layout="centered")
 st.title("🏦 Convert Bank of America to QFX")
-st.markdown("Upload a BofA file (CSV or Excel) to convert it to QFX format for import into MoneyGrit.")
+st.markdown("Upload a BofA file (CSV or Excel) to convert it to QFX format for import into MoneyGrit or Quicken.")
 
 uploaded_file = st.file_uploader(
     "Upload a Bank of America CSV or Excel file", 
