@@ -255,10 +255,13 @@ if uploaded_file:
                     st.text(f"... and {len(skipped_rows) - 10} more")
         
         # Download button
+        original_filename = uploaded_file.name.rsplit('.', 1)[0]  # Remove original extension
+        qfx_filename = f"{original_filename}.qfx"
+        
         st.download_button(
             label="📥 Download QFX File",
             data=qfx_content,
-            file_name=f"bofa_transactions_{datetime.now().strftime('%Y%m%d')}.qfx",
+            file_name=qfx_filename,
             mime="application/x-ofx"
         )
         
