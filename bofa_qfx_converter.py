@@ -17,12 +17,14 @@ def parse_bofa_file(file):
             header_row_index = None
             for i, row in raw_df.iterrows():
                 row_lower = row.astype(str).str.lower().tolist()
-                if 'date' in row_lower and 'amount' in row_lower:
+                # Check for checking/savings format OR credit card format
+                if ('date' in row_lower and 'amount' in row_lower) or \
+                   ('posting date' in ' '.join(row_lower) or 'posting_date' in ' '.join(row_lower)):
                     header_row_index = i
                     break
             
             if header_row_index is None:
-                raise ValueError("Could not find header row with 'Date' and 'Amount' columns")
+                raise ValueError("Could not find header row with transaction columns")
             
             # Re-read with proper header
             file.seek(0)
@@ -44,13 +46,14 @@ def parse_bofa_file(file):
         
         for i, line in enumerate(lines):
             line_lower = line.lower()
-            # Look for line with Date, Description, Amount
-            if 'date' in line_lower and 'amount' in line_lower and 'summary' not in line_lower:
+            # Look for checking/savings format OR credit card format
+            if ('date' in line_lower and 'amount' in line_lower and 'summary' not in line_lower) or \
+               ('posting date' in line_lower or 'posting_date' in line_lower):
                 header_line_index = i
                 break
         
         if header_line_index is None:
-            raise ValueError("Could not find the transaction header row (looking for 'Date' and 'Amount' columns)")
+            raise ValueError("Could not find the transaction header row")
         
         # Get all lines from header onwards
         data_lines = lines[header_line_index:]
@@ -71,7 +74,7 @@ def parse_bofa_file(file):
             df = pd.read_csv(
                 io.StringIO(data_content),
                 delimiter=delimiter,
-                thousands=',',  # Handle numbers like 1,695.01
+                thousands=',',
                 on_bad_lines='skip'
             )
             
@@ -147,8 +150,10 @@ def convert_to_qfx(df, account_type='CHECKING'):
     
     for i, row in df.iterrows():
         try:
-            # Get date
-            date_value = row.get("date") or row.get("posted_date") or row.get("transaction_date")
+            # Get date - handle both checking and credit card formats
+            date_value = (row.get("date") or row.get("posted_date") or 
+                         row.get("posting_date") or row.get("trans._date") or
+                         row.get("transaction_date"))
             if pd.isna(date_value) or date_value == '':
                 continue
             
@@ -164,7 +169,7 @@ def convert_to_qfx(df, account_type='CHECKING'):
             
             date_str = date.strftime('%Y%m%d')
             
-            # Get amount
+            # Get amount - handle both formats
             amount_value = row.get("amount") or row.get("transaction_amount")
             if pd.isna(amount_value) or amount_value == '':
                 continue
@@ -176,8 +181,16 @@ def convert_to_qfx(df, account_type='CHECKING'):
                 
             amount = float(amount_str)
             
-            # Get description
-            name = str(row.get("description") or row.get("name") or row.get("payee") or "N/A").strip()
+            # For credit cards, check Transaction Type column (D=Debit/charge, C=Credit/refund)
+            trans_type = str(row.get("transaction_type") or "").strip().upper()
+            if trans_type == 'C':  # Credit/refund on credit card
+                amount = -abs(amount)  # Make it negative (reduces balance owed)
+            elif trans_type == 'D':  # Debit/charge on credit card
+                amount = abs(amount)  # Make it positive (increases balance owed)
+            
+            # Get description - handle both formats
+            name = str(row.get("description") or row.get("name") or 
+                      row.get("payee") or row.get("merchant_category") or "N/A").strip()
             
             # Skip if description contains summary keywords
             if any(word in name.lower() for word in ["beginning balance", "ending balance", "total credits", "total debits"]):
@@ -188,7 +201,17 @@ def convert_to_qfx(df, account_type='CHECKING'):
             # Create unique FITID based on transaction details
             # Include more fields to handle edge cases of identical transactions
             running_bal = str(row.get("running_bal.") or row.get("running_bal") or "")
-            fitid_string = f"{date_str}{amount:.2f}{name[:50]}{running_bal}"
+            reference_id = str(row.get("reference_id") or "")
+            
+            # For credit cards, use reference_id if available, otherwise use date+amount+description
+            if reference_id:
+                fitid_string = f"{reference_id}{date_str}{amount:.2f}"
+            elif running_bal:
+                fitid_string = f"{date_str}{amount:.2f}{name[:50]}{running_bal}"
+            else:
+                # Fallback for credit cards without running balance
+                fitid_string = f"{date_str}{amount:.2f}{name[:50]}{i}"
+            
             fitid = hashlib.md5(fitid_string.encode()).hexdigest()[:16]
             
             # Determine transaction type
