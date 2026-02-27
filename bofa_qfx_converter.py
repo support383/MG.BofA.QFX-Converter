@@ -2,7 +2,36 @@ import streamlit as st
 import pandas as pd
 import io
 import hashlib
+import re
 from datetime import datetime
+
+def normalize_payee(payee_text):
+    """Normalize payee text for stable FITID generation"""
+    if not payee_text or pd.isna(payee_text):
+        return ""
+    # Convert to string, uppercase, trim, normalize whitespace
+    s = str(payee_text).strip().upper()
+    s = re.sub(r'\s+', ' ', s)
+    return s
+
+def generate_fitid(date_str, amount, description, reference_number=None):
+    """
+    Generate stable FITID that works across BofA download types.
+    Priority:
+    1. Use Reference Number if available (most stable)
+    2. Fall back to normalized hash of date+amount+description
+    """
+    # First priority: Use bank-provided reference number
+    if reference_number and str(reference_number).strip() and str(reference_number).strip().lower() != 'nan':
+        ref = str(reference_number).strip()
+        # Remove "Ref: " prefix if present, keep just the number
+        ref = re.sub(r'^ref:\s*', '', ref, flags=re.IGNORECASE)
+        return ref[:16]  # Limit to 16 chars for FITID
+    
+    # Fallback: Create stable hash from normalized fields
+    normalized_desc = normalize_payee(description)
+    fitid_string = f"{date_str}|{amount:.2f}|{normalized_desc[:60]}"
+    return hashlib.md5(fitid_string.encode('utf-8')).hexdigest()[:16]
 
 def parse_bofa_file(file):
     """Parse BofA CSV or Excel file"""
@@ -181,12 +210,11 @@ def convert_to_qfx(df, account_type='CHECKING'):
                 
             amount = float(amount_str)
             
-            # For credit cards, check Transaction Type column (D=Debit/charge, C=Credit/refund)
+            # Handle transaction type for credit cards
+            # For credit cards: D=Debit/charge, C=Credit/payment
+            # DON'T modify the amount - keep it as-is from the CSV
+            # The QFX TRNTYPE will indicate if it's a debit or credit
             trans_type = str(row.get("transaction_type") or "").strip().upper()
-            if trans_type == 'C':  # Credit/refund on credit card
-                amount = -abs(amount)  # Make it negative (reduces balance owed)
-            elif trans_type == 'D':  # Debit/charge on credit card
-                amount = abs(amount)  # Make it positive (increases balance owed)
             
             # Get description - handle both formats
             name = str(row.get("description") or row.get("name") or 
@@ -198,21 +226,11 @@ def convert_to_qfx(df, account_type='CHECKING'):
             
             memo = str(row.get("memo") or name).strip()
             
-            # Create unique FITID based on transaction details
-            # Include more fields to handle edge cases of identical transactions
-            running_bal = str(row.get("running_bal.") or row.get("running_bal") or "")
-            reference_id = str(row.get("reference_id") or "")
+            # Get reference number for stable FITID (works across download types)
+            reference_number = row.get("reference_number") or row.get("reference_id") or None
             
-            # For credit cards, use reference_id if available, otherwise use date+amount+description
-            if reference_id:
-                fitid_string = f"{reference_id}{date_str}{amount:.2f}"
-            elif running_bal:
-                fitid_string = f"{date_str}{amount:.2f}{name[:50]}{running_bal}"
-            else:
-                # Fallback for credit cards without running balance
-                fitid_string = f"{date_str}{amount:.2f}{name[:50]}{i}"
-            
-            fitid = hashlib.md5(fitid_string.encode()).hexdigest()[:16]
+            # Create unique FITID using new stable strategy
+            fitid = generate_fitid(date_str, amount, name, reference_number)
             
             # Determine transaction type
             trntype = "DEBIT" if amount < 0 else "CREDIT"
