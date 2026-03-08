@@ -287,6 +287,59 @@ if uploaded_file:
         
         st.success(f"✅ Converted {transaction_count} transactions to QFX format!")
         
+        # Debug: Show sample FITIDs for troubleshooting
+        with st.expander("🔍 Debug: Sample FITIDs (for troubleshooting duplicates)"):
+            st.write("First 5 transactions and their FITIDs:")
+            st.write("If FITIDs change when converting the same file twice, there's a bug!")
+            debug_info = []
+            temp_count = 0
+            for i, row in df.iterrows():
+                if temp_count >= 5:
+                    break
+                try:
+                    date_value = (row.get("date") or row.get("posted_date") or 
+                                 row.get("posting_date") or row.get("trans._date") or
+                                 row.get("transaction_date"))
+                    if pd.isna(date_value) or date_value == '':
+                        continue
+                    date = pd.to_datetime(date_value, errors='coerce')
+                    if pd.isna(date):
+                        continue
+                    date_str = date.strftime('%Y%m%d')
+                    
+                    amount_value = row.get("amount") or row.get("transaction_amount")
+                    if pd.isna(amount_value) or amount_value == '':
+                        continue
+                    amount = float(str(amount_value).replace(",", "").replace("$", "").strip())
+                    
+                    name = str(row.get("description") or row.get("name") or 
+                              row.get("payee") or "N/A").strip()
+                    
+                    reference_number = row.get("reference_number") or row.get("reference_id") or None
+                    
+                    # Show what's going into the hash
+                    normalized_name = normalize_payee(name)
+                    
+                    debug_info.append({
+                        "Date": date_str,
+                        "Amount": f"{amount:.2f}",
+                        "Description": name[:30],
+                        "Normalized": normalized_name[:30],
+                        "Ref#": str(reference_number)[:20] if reference_number else "None",
+                        "Hash Input": f"{date_str}|{amount:.2f}|{normalized_name[:60]}"[:50],
+                        "FITID": generate_fitid(date_str, amount, name, reference_number)
+                    })
+                    temp_count += 1
+                except Exception as e:
+                    st.write(f"Debug error on row {i}: {e}")
+                    continue
+            
+            if debug_info:
+                for item in debug_info:
+                    st.write("---")
+                    for key, value in item.items():
+                        st.write(f"**{key}:** {value}")
+        
         # Show skipped rows if any
         if skipped_rows and len(skipped_rows) > 0:
             with st.expander(f"⚠️ Skipped {len(skipped_rows)} rows"):
