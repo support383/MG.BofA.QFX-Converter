@@ -3,7 +3,7 @@ import pandas as pd
 import io
 import hashlib
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timedelta
 
 def normalize_payee(payee_text):
     """Normalize payee text for stable FITID generation"""
@@ -16,22 +16,96 @@ def normalize_payee(payee_text):
 
 def generate_fitid(date_str, amount, description, reference_number=None):
     """
-    Generate stable FITID that works across BofA download types.
-    Priority:
-    1. Use Reference Number if available (most stable)
-    2. Fall back to normalized hash of date+amount+description
-    """
-    # First priority: Use bank-provided reference number
-    if reference_number and str(reference_number).strip() and str(reference_number).strip().lower() != 'nan':
-        ref = str(reference_number).strip()
-        # Remove "Ref: " prefix if present, keep just the number
-        ref = re.sub(r'^ref:\s*', '', ref, flags=re.IGNORECASE)
-        return ref[:16]  # Limit to 16 chars for FITID
+    Generate FITID that's stable across BofA's data changes.
     
-    # Fallback: Create stable hash from normalized fields
+    Strategy: Create a "fuzzy" FITID that matches even when BofA changes:
+    - Dates by 1-2 days (pending -> posted)
+    - Minor description variations
+    - Exact penny amounts
+    
+    We intentionally make this slightly fuzzy so the same real-world
+    transaction creates the same FITID across different downloads.
+    """
+    
+    # Parse the date
+    date_obj = datetime.strptime(date_str, '%Y%m%d')
+    
+    # Normalize description heavily
     normalized_desc = normalize_payee(description)
-    fitid_string = f"{date_str}|{amount:.2f}|{normalized_desc[:60]}"
+    
+    # Take only the CORE merchant name (first 12 chars)
+    # This handles: "AMAZON MKTPL*8C4UB9G83" vs "AMAZON MKTPL*8C4UB9Z99"
+    merchant_core = normalized_desc[:12]
+    
+    # Round amount to nearest dollar to handle pending vs final
+    # $23.45 and $23.99 both become $23
+    amount_rounded = round(abs(amount))
+    
+    # Use week-based date instead of exact date
+    # This handles Mon vs Tue posting for the same transaction
+    # Get the Monday of the week this transaction falls in
+    days_since_monday = date_obj.weekday()
+    week_start = date_obj - timedelta(days=days_since_monday)
+    week_key = week_start.strftime('%Y%m%d')
+    
+    # Create FITID from fuzzy components
+    fitid_string = f"{week_key}|{amount_rounded}|{merchant_core}"
+    
     return hashlib.md5(fitid_string.encode('utf-8')).hexdigest()[:16]
+
+def extract_transactions_from_qfx(qfx_content):
+    """Extract transaction data from existing QFX file"""
+    transactions = []
+    
+    # Parse QFX to extract transactions
+    lines = qfx_content.split('\n')
+    current_txn = {}
+    
+    for line in lines:
+        line = line.strip()
+        if '<STMTTRN>' in line:
+            current_txn = {}
+        elif '<DTPOSTED>' in line:
+            current_txn['date'] = line.replace('<DTPOSTED>', '').replace('</DTPOSTED>', '')
+        elif '<TRNAMT>' in line:
+            current_txn['amount'] = float(line.replace('<TRNAMT>', '').replace('</TRNAMT>', ''))
+        elif '<NAME>' in line:
+            current_txn['description'] = line.replace('<NAME>', '').replace('</NAME>', '')
+        elif '<FITID>' in line:
+            current_txn['fitid'] = line.replace('<FITID>', '').replace('</FITID>', '')
+        elif '</STMTTRN>' in line:
+            if current_txn:
+                transactions.append(current_txn.copy())
+    
+    return transactions
+
+def fuzzy_match(txn1, txn2, date_tolerance_days=2, amount_tolerance=1.0):
+    """Check if two transactions are likely the same despite data changes"""
+    # Compare dates (allow +/- tolerance)
+    try:
+        date1 = datetime.strptime(txn1['date'], '%Y%m%d')
+        date2 = datetime.strptime(txn2['date'], '%Y%m%d')
+        date_diff = abs((date1 - date2).days)
+        if date_diff > date_tolerance_days:
+            return False
+    except:
+        if txn1['date'] != txn2['date']:
+            return False
+    
+    # Compare amounts (allow small variance)
+    amt_diff = abs(txn1['amount'] - txn2['amount'])
+    if amt_diff > amount_tolerance:
+        return False
+    
+    # Compare descriptions (check if one starts with the other)
+    desc1 = normalize_payee(txn1['description'])[:20]
+    desc2 = normalize_payee(txn2['description'])[:20]
+    
+    # If first 15 chars match, likely the same merchant
+    if desc1[:15] == desc2[:15]:
+        return True
+    
+    return False
 
 def parse_bofa_file(file):
     """Parse BofA CSV or Excel file"""
@@ -211,9 +285,7 @@ def convert_to_qfx(df, account_type='CHECKING'):
             amount = float(amount_str)
             
             # Handle transaction type for credit cards
-            # For credit cards: D=Debit/charge, C=Credit/payment
             # DON'T modify the amount - keep it as-is from the CSV
-            # The QFX TRNTYPE will indicate if it's a debit or credit
             trans_type = str(row.get("transaction_type") or "").strip().upper()
             
             # Get description - handle both formats
@@ -226,10 +298,10 @@ def convert_to_qfx(df, account_type='CHECKING'):
             
             memo = str(row.get("memo") or name).strip()
             
-            # Get reference number for stable FITID (works across download types)
+            # Get reference number for stable FITID
             reference_number = row.get("reference_number") or row.get("reference_id") or None
             
-            # Create unique FITID using new stable strategy
+            # Create FITID using fuzzy approach
             fitid = generate_fitid(date_str, amount, name, reference_number)
             
             # Determine transaction type
@@ -281,64 +353,11 @@ if uploaded_file:
         with st.spinner("Parsing file..."):
             df = parse_bofa_file(uploaded_file)
         
-        # Convert to QFX (default to CHECKING)
+        # Convert to QFX
         with st.spinner("Converting to QFX..."):
             qfx_content, transaction_count, skipped_rows = convert_to_qfx(df, 'CHECKING')
         
         st.success(f"✅ Converted {transaction_count} transactions to QFX format!")
-        
-        # Debug: Show sample FITIDs for troubleshooting
-        with st.expander("🔍 Debug: Sample FITIDs (for troubleshooting duplicates)"):
-            st.write("First 5 transactions and their FITIDs:")
-            st.write("If FITIDs change when converting the same file twice, there's a bug!")
-            debug_info = []
-            temp_count = 0
-            for i, row in df.iterrows():
-                if temp_count >= 5:
-                    break
-                try:
-                    date_value = (row.get("date") or row.get("posted_date") or 
-                                 row.get("posting_date") or row.get("trans._date") or
-                                 row.get("transaction_date"))
-                    if pd.isna(date_value) or date_value == '':
-                        continue
-                    date = pd.to_datetime(date_value, errors='coerce')
-                    if pd.isna(date):
-                        continue
-                    date_str = date.strftime('%Y%m%d')
-                    
-                    amount_value = row.get("amount") or row.get("transaction_amount")
-                    if pd.isna(amount_value) or amount_value == '':
-                        continue
-                    amount = float(str(amount_value).replace(",", "").replace("$", "").strip())
-                    
-                    name = str(row.get("description") or row.get("name") or 
-                              row.get("payee") or "N/A").strip()
-                    
-                    reference_number = row.get("reference_number") or row.get("reference_id") or None
-                    
-                    # Show what's going into the hash
-                    normalized_name = normalize_payee(name)
-                    
-                    debug_info.append({
-                        "Date": date_str,
-                        "Amount": f"{amount:.2f}",
-                        "Description": name[:30],
-                        "Normalized": normalized_name[:30],
-                        "Ref#": str(reference_number)[:20] if reference_number else "None",
-                        "Hash Input": f"{date_str}|{amount:.2f}|{normalized_name[:60]}"[:50],
-                        "FITID": generate_fitid(date_str, amount, name, reference_number)
-                    })
-                    temp_count += 1
-                except Exception as e:
-                    st.write(f"Debug error on row {i}: {e}")
-                    continue
-            
-            if debug_info:
-                for item in debug_info:
-                    st.write("---")
-                    for key, value in item.items():
-                        st.write(f"**{key}:** {value}")
         
         # Show skipped rows if any
         if skipped_rows and len(skipped_rows) > 0:
@@ -349,7 +368,7 @@ if uploaded_file:
                     st.text(f"... and {len(skipped_rows) - 10} more")
         
         # Download button
-        original_filename = uploaded_file.name.rsplit('.', 1)[0]  # Remove original extension
+        original_filename = uploaded_file.name.rsplit('.', 1)[0]
         qfx_filename = f"{original_filename}.qfx"
         
         st.download_button(
