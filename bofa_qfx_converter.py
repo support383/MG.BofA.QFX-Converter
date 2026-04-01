@@ -6,7 +6,7 @@ import os
 from datetime import datetime, timedelta
 
 st.set_page_config(
-    page_title="CSV to QFX Converter",
+    page_title="CSV/Excel to QFX Converter",
     page_icon="⇄",
     layout="centered"
 )
@@ -528,148 +528,6 @@ PARSERS = {
 }
 
 
-# ── UI ────────────────────────────────────────────────────────────────────────
-
-st.markdown("# ⇄ CSV → QFX")
-st.markdown('<p class="mono">Multi-institution transaction converter for MoneyGrit</p>', unsafe_allow_html=True)
-st.markdown("---")
-
-col_main, col_settings = st.columns([2, 1])
-
-with col_settings:
-    st.markdown("### ⚙ Settings")
-
-    currency = st.selectbox("Account currency", ["USD", "EUR", "GBP", "CAD", "AUD", "CHF"], index=0)
-    account_id = st.text_input("Account ID (optional)", placeholder="e.g. 1234 or CHECKING")
-
-    st.markdown("**Wise options**")
-    wise_amount = st.radio(
-        "Wise: which amount to use?",
-        ["Source (account currency)", "Target (merchant currency)"],
-        index=0
-    )
-    wise_use_source = wise_amount.startswith("Source")
-
-with col_main:
-    st.markdown("### ① Upload files")
-    uploaded = st.file_uploader(
-        "Drop one or more CSV files",
-        type=['csv', 'CSV'],
-        accept_multiple_files=True
-    )
-
-    if uploaded:
-        st.markdown("---")
-        st.markdown("### ② Detected formats")
-
-        all_transactions = []
-        file_results = []
-
-        for f in uploaded:
-            content = f.read()
-            fmt, text = detect_format(f.name, content)
-            label, badge_cls = FORMAT_LABELS.get(fmt, ('Unknown', 'unknown'))
-
-            st.markdown(
-                f'<span class="format-badge {badge_cls}">{label}</span> '
-                f'<span class="mono">{f.name}</span>',
-                unsafe_allow_html=True
-            )
-
-            if fmt == 'unknown':
-                st.warning(f"⚠ Could not detect format for {f.name} — skipping.")
-                file_results.append({'name': f.name, 'status': 'error', 'count': 0, 'msg': 'Unknown format'})
-                continue
-
-            try:
-                if fmt == 'wise':
-                    txns = parse_wise(text, f.name, use_source_amount=wise_use_source)
-                else:
-                    txns = PARSERS[fmt](text, f.name)
-
-                if not txns:
-                    st.warning(f"⚠ No transactions found in {f.name}")
-                    file_results.append({'name': f.name, 'status': 'error', 'count': 0, 'msg': 'No transactions parsed'})
-                    continue
-
-                all_transactions.extend(txns)
-                file_results.append({'name': f.name, 'status': 'ok', 'count': len(txns), 'fmt': label})
-                st.markdown(
-                    f'<div class="result-box success"><span class="stat">{len(txns)}</span> '
-                    f'<span class="mono"> transactions parsed</span></div>',
-                    unsafe_allow_html=True
-                )
-
-            except Exception as e:
-                st.error(f"Error parsing {f.name}: {e}")
-                file_results.append({'name': f.name, 'status': 'error', 'count': 0, 'msg': str(e)})
-
-        if all_transactions:
-            st.markdown("---")
-            st.markdown("### ③ Preview & Export")
-
-            # Dedup by FITID
-            seen = {}
-            deduped = []
-            for t in all_transactions:
-                if t['fitid'] not in seen:
-                    seen[t['fitid']] = True
-                    deduped.append(t)
-
-            dupes = len(all_transactions) - len(deduped)
-
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Total parsed", len(all_transactions))
-            c2.metric("After dedup", len(deduped))
-            c3.metric("Duplicates removed", dupes)
-
-            # Sort by date desc
-            deduped.sort(key=lambda x: x['date'], reverse=True)
-
-            # Preview table
-            preview_df = pd.DataFrame([{
-                'Date': t['date'].strftime('%Y-%m-%d'),
-                'Description': t['description'],
-                'Amount': f"{t['amount']:+.2f}",
-                'FITID': t['fitid']
-            } for t in deduped[:25]])
-            st.dataframe(preview_df, use_container_width=True, hide_index=True)
-            if len(deduped) > 25:
-                st.markdown(f'<p class="mono">Showing 25 of {len(deduped)} transactions</p>', unsafe_allow_html=True)
-
-            # Build QFX
-            try:
-                acct = account_id.strip() if account_id.strip() else "IMPORT"
-                qfx_content = build_qfx(deduped, account_id=acct, currency=currency)
-
-                # Output filename
-                if len(uploaded) == 1:
-                    base = os.path.splitext(uploaded[0].name)[0]
-                else:
-                    base = "combined_transactions"
-                out_name = f"{base}.qfx"
-
-                st.download_button(
-                    label=f"⬇  Download {out_name}",
-                    data=qfx_content.encode('utf-8'),
-                    file_name=out_name,
-                    mime='application/x-ofx'
-                )
-            except Exception as e:
-                st.error(f"QFX generation error: {e}")
-
-    else:
-        st.markdown("""
-        <div class="result-box" style="text-align:center; padding: 3rem;">
-            <div style="font-size:3rem; margin-bottom:1rem">⇄</div>
-            <div class="mono">Upload one or more CSV files to begin</div>
-            <br>
-            <div class="mono" style="color: #4af0c4">
-            BofA Credit Card · BofA Checking · BofA Business Card<br>
-            Chase · BILT Rewards · Wise
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
 # ── UI ────────────────────────────────────────────────────────────────────────────────────
 
 # Default settings (no visible settings panel)
@@ -677,13 +535,13 @@ currency        = "USD"
 account_id      = ""
 wise_use_source = True
 
-st.title("⇄ CSV to QFX Converter")
-st.caption("Upload a bank CSV export to convert it to QFX format for import into MoneyGrit.")
+st.title("⇄ CSV/Excel to QFX Converter")
+st.caption("Upload a bank CSV or Excel export to convert it to QFX format for import into MoneyGrit.")
 st.markdown("---")
 
 uploaded = st.file_uploader(
-    "Upload one or more CSV files",
-    type=['csv', 'CSV'],
+    "Upload one or more CSV/Excel files",
+    type=['csv', 'CSV', 'xls', 'xlsx'],
     accept_multiple_files=True
 )
 
