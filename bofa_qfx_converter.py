@@ -540,89 +540,49 @@ st.caption("Upload a bank CSV or Excel export to convert it to QFX format for im
 st.markdown("---")
 
 uploaded = st.file_uploader(
-    "Upload one or more CSV/Excel files",
+    "Upload a CSV/Excel file",
     type=['csv', 'CSV', 'xls', 'xlsx'],
-    accept_multiple_files=True
+    accept_multiple_files=False
 )
 
 if uploaded:
-    all_transactions = []
+    content_bytes = uploaded.read()
+    fmt, text = detect_format(uploaded.name, content_bytes)
+    label, badge_cls = FORMAT_LABELS.get(fmt, ('Unknown', 'unknown'))
 
-    st.markdown("**Files detected:**")
-    for f in uploaded:
-        content_bytes = f.read()
-        fmt, text = detect_format(f.name, content_bytes)
-        label, badge_cls = FORMAT_LABELS.get(fmt, ('Unknown', 'unknown'))
-
-        if fmt == 'unknown':
-            st.markdown(
-                f'<div class="result-row"><span><span class="format-badge unknown">Unknown</span>{f.name}</span>'
-                f'<span class="txn-error">Could not detect format — skipped</span></div>',
-                unsafe_allow_html=True)
-            continue
-
+    if fmt == 'unknown':
+        st.error(f"⚠ Could not detect the format of {uploaded.name}. Please contact support@moneygrit.com.")
+    else:
         try:
-            if fmt == 'wise':
-                txns = parse_wise(text, f.name, use_source_amount=wise_use_source)
-            else:
-                txns = PARSERS[fmt](text, f.name)
+            txns = parse_wise(text, uploaded.name, use_source_amount=wise_use_source) \
+                   if fmt == 'wise' else PARSERS[fmt](text, uploaded.name)
 
             if not txns:
+                st.error(f"⚠ No transactions found in {uploaded.name}.")
+            else:
                 st.markdown(
-                    f'<div class="result-row"><span><span class="format-badge unknown">Empty</span>{f.name}</span>'
-                    f'<span class="txn-error">No transactions found</span></div>',
+                    f'<div class="result-row"><span><span class="format-badge">{label}</span>{uploaded.name}</span>'
+                    f'<span class="txn-count">{len(txns)} transactions found</span></div>',
                     unsafe_allow_html=True)
-                continue
 
-            all_transactions.extend(txns)
-            st.markdown(
-                f'<div class="result-row"><span><span class="format-badge">{label}</span>{f.name}</span>'
-                f'<span class="txn-count">{len(txns)} transactions</span></div>',
-                unsafe_allow_html=True)
+                st.markdown("")
+
+                with st.expander("Preview transactions", expanded=False):
+                    preview_df = pd.DataFrame([{
+                        'Date':        t['date'].strftime('%Y-%m-%d'),
+                        'Description': t['description'],
+                        'Amount':      f"{t['amount']:+.2f}",
+                    } for t in sorted(txns, key=lambda x: x['date'], reverse=True)[:50]])
+                    st.dataframe(preview_df, use_container_width=True, hide_index=True)
+
+                qfx_content = build_qfx(txns, account_id="IMPORT", currency=currency)
+                out_name = os.path.splitext(uploaded.name)[0] + ".qfx"
+                st.download_button(
+                    label=f"⬇  Download {out_name}",
+                    data=qfx_content.encode('utf-8'),
+                    file_name=out_name,
+                    mime='application/x-ofx'
+                )
 
         except Exception as e:
-            st.markdown(
-                f'<div class="result-row"><span><span class="format-badge unknown">Error</span>{f.name}</span>'
-                f'<span class="txn-error">{e}</span></div>',
-                unsafe_allow_html=True)
-
-    if all_transactions:
-        st.markdown("")
-
-        # Dedup by FITID
-        seen, deduped = {}, []
-        for t in all_transactions:
-            if t['fitid'] not in seen:
-                seen[t['fitid']] = True
-                deduped.append(t)
-        dupes = len(all_transactions) - len(deduped)
-
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Transactions", len(all_transactions))
-        c2.metric("After dedup",  len(deduped))
-        c3.metric("Duplicates removed", dupes)
-
-        deduped.sort(key=lambda x: x['date'], reverse=True)
-
-        with st.expander("Preview transactions", expanded=False):
-            preview_df = pd.DataFrame([{
-                'Date':        t['date'].strftime('%Y-%m-%d'),
-                'Description': t['description'],
-                'Amount':      f"{t['amount']:+.2f}",
-                'FITID':       t['fitid']
-            } for t in deduped[:50]])
-            st.dataframe(preview_df, use_container_width=True, hide_index=True)
-
-        try:
-            qfx_content = build_qfx(deduped, account_id="IMPORT", currency=currency)
-            base     = os.path.splitext(uploaded[0].name)[0] if len(uploaded) == 1 else "combined_transactions"
-            out_name = f"{base}.qfx"
-
-            st.download_button(
-                label=f"⬇  Download {out_name}",
-                data=qfx_content.encode('utf-8'),
-                file_name=out_name,
-                mime='application/x-ofx'
-            )
-        except Exception as e:
-            st.error(f"QFX generation error: {e}")
+            st.error(f"Error converting {uploaded.name}: {e}")
