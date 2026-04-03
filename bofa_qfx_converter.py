@@ -95,6 +95,10 @@ def detect_format(filename, content_bytes):
     if 'Transaction Date' in first_lines and 'Post Date' in first_lines and 'Memo' in first_lines:
         return 'chase', text
 
+    # Capital One: has separate Debit and Credit columns
+    if 'Transaction Date' in first_lines and 'Posted Date' in first_lines and 'Debit' in first_lines and 'Credit' in first_lines:
+        return 'capital-one', text
+
     # BILT: Transaction Date, Posted Date, Description, Amount (no address/running bal)
     if 'Transaction Date' in first_lines and 'Posted Date' in first_lines and 'Description' in first_lines and 'Address' not in first_lines and 'Running' not in first_lines:
         return 'bilt', text
@@ -443,6 +447,43 @@ def parse_wise(text, filename, use_source_amount=True):
     return rows
 
 
+def parse_capital_one(text, filename):
+    """Capital One: Transaction Date, Posted Date, Card No., Description, Category, Debit, Credit"""
+    rows = []
+    import csv
+    lines = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+    reader = csv.DictReader(lines)
+    for row in reader:
+        date_str = (row.get('Posted Date') or row.get('Transaction Date', '')).strip()
+        desc     = row.get('Description', '').strip()
+        debit    = row.get('Debit', '').strip()
+        credit   = row.get('Credit', '').strip()
+
+        if not date_str or not desc:
+            continue
+        try:
+            date_obj = parse_date(date_str)
+            # Debit = charge (negative), Credit = payment/refund (positive)
+            if debit:
+                amount = -abs(normalize_amount(debit))
+            elif credit:
+                amount = abs(normalize_amount(credit))
+            else:
+                continue
+
+            fitid = make_fitid_hash(date_obj.strftime('%Y%m%d'), amount, desc)
+            rows.append({
+                'date':        date_obj,
+                'amount':      amount,
+                'description': desc,
+                'fitid':       fitid,
+                'memo':        row.get('Category', '').strip()
+            })
+        except:
+            continue
+    return rows
+
+
 def parse_wells_fargo(text, filename):
     """Wells Fargo checking: no header, columns are date, amount, *, blank, description"""
     rows = []
@@ -558,6 +599,7 @@ FORMAT_LABELS = {
     'bilt': ('BILT Rewards', 'bilt'),
     'wise': ('Wise', 'wise'),
     'generic': ('Generic CSV', 'unknown'),
+    'capital-one': ('Capital One', 'chase'),
     'wells-fargo': ('Wells Fargo', 'wells'),
     'unknown': ('Unknown Format', 'unknown'),
 }
@@ -568,7 +610,8 @@ PARSERS = {
     'bofa-business': parse_bofa_business,
     'chase': parse_chase,
     'bilt': parse_bilt,
-    'wells-fargo': parse_wells_fargo,
+    'capital-one':  parse_capital_one,
+    'wells-fargo':  parse_wells_fargo,
 }
 
 
