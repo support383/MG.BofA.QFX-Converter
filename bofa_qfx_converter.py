@@ -107,6 +107,21 @@ def detect_format(filename, content_bytes):
     if 'Date' in first_lines and 'Amount' in first_lines:
         return 'generic', text
 
+    # Wells Fargo: no header row, 5 columns: date, amount, *, blank, description
+    import csv as _csv, io as _io
+    try:
+        sample_rows = list(_csv.reader(_io.StringIO(text)))[:3]
+        if all(len(r) == 5 and r[2].strip() in ('*', '') for r in sample_rows if r):
+            try:
+                from datetime import datetime as _dt
+                _dt.strptime(sample_rows[0][0].strip(), '%m/%d/%Y')
+                float(sample_rows[0][1].strip())
+                return 'wells-fargo', text
+            except:
+                pass
+    except:
+        pass
+
     return 'unknown', text
 
 
@@ -428,6 +443,33 @@ def parse_wise(text, filename, use_source_amount=True):
     return rows
 
 
+def parse_wells_fargo(text, filename):
+    """Wells Fargo checking: no header, columns are date, amount, *, blank, description"""
+    rows = []
+    import csv
+    reader = csv.reader(text.splitlines())
+    for row in reader:
+        if len(row) < 5:
+            continue
+        try:
+            date_obj = parse_date(row[0].strip())
+            amount   = normalize_amount(row[1].strip())
+            desc     = row[4].strip()
+            if not desc:
+                continue
+            fitid = make_fitid_hash(date_obj.strftime('%Y%m%d'), amount, desc)
+            rows.append({
+                'date':        date_obj,
+                'amount':      amount,
+                'description': desc,
+                'fitid':       fitid,
+                'memo':        ''
+            })
+        except:
+            continue
+    return rows
+
+
 # ── QFX Builder ───────────────────────────────────────────────────────────────
 
 def build_qfx(transactions, account_id="UNKNOWN", bank_id="000000000", currency="USD"):
@@ -516,6 +558,7 @@ FORMAT_LABELS = {
     'bilt': ('BILT Rewards', 'bilt'),
     'wise': ('Wise', 'wise'),
     'generic': ('Generic CSV', 'unknown'),
+    'wells-fargo': ('Wells Fargo', 'wells'),
     'unknown': ('Unknown Format', 'unknown'),
 }
 
@@ -525,6 +568,7 @@ PARSERS = {
     'bofa-business': parse_bofa_business,
     'chase': parse_chase,
     'bilt': parse_bilt,
+    'wells-fargo': parse_wells_fargo,
 }
 
 
