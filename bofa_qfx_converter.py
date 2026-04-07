@@ -103,6 +103,10 @@ def detect_format(filename, content_bytes):
     if 'Transaction Date' in first_lines and 'Posted Date' in first_lines and 'Description' in first_lines and 'Address' not in first_lines and 'Running' not in first_lines:
         return 'bilt', text
 
+    # Discover: Trans. Date, Post Date, Description, Amount, Category
+    if 'Trans. Date' in first_lines and 'Post Date' in first_lines and 'Description' in first_lines:
+        return 'discover', text
+
     # BofA Checking: Date, Description, Amount, Running Bal (with summary header)
     if 'Running Bal' in first_lines or ('Date,Description,Amount' in first_lines.replace(' ', '')):
         return 'bofa-checking', text
@@ -187,6 +191,7 @@ def parse_bofa_cc(text, filename):
             else:
                 fitid = make_fitid_hash(date_obj.strftime('%Y%m%d'), amount, payee)
 
+            amount = -amount  # credit card: flip so charges are positive
             rows.append({
                 'date': date_obj,
                 'amount': amount,
@@ -277,15 +282,13 @@ def parse_bofa_business(text, filename):
             else:
                 fitid = make_fitid_hash(date_obj.strftime('%Y%m%d'), amount, desc)
 
-            # Use Transaction Type column: D=Debit(charge)=negative, C=Credit(refund)=positive
-            # Fall back to sign of amount if Transaction Type not present
+            # D=Debit(charge)=positive, C=Credit(payment)=negative (credit card convention)
             if txn_type == 'D':
-                amount = -abs(amount)
-            elif txn_type == 'C':
                 amount = abs(amount)
-            else:
-                # No Transaction Type column — infer from sign (positive=charge, so negate)
+            elif txn_type == 'C':
                 amount = -abs(amount)
+            else:
+                amount = abs(amount)
 
             rows.append({
                 'date': date_obj,
@@ -316,6 +319,7 @@ def parse_chase(text, filename):
         try:
             date_obj = parse_date(date_str)
             amount = normalize_amount(amt_str)
+            amount = -amount  # credit card: flip so charges are positive
             fitid = make_fitid_hash(date_obj.strftime('%Y%m%d'), amount, desc)
             rows.append({
                 'date': date_obj,
@@ -330,43 +334,59 @@ def parse_chase(text, filename):
 
 
 def parse_bilt(text, filename):
-    """BILT: Transaction Date, Posted Date, Description, Amount (charges are POSITIVE)"""
+    """BILT: Transaction Date, Posted Date, Description, Amount
+    Supports old format (4 cols) and new format (7 cols with Card Last 4 etc.)
+    New format: charges positive, payments negative — already correct for MoneyGrit credit card convention."""
     rows = []
     lines = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
 
     import csv
     reader = csv.DictReader(lines)
     for row in reader:
-        # Use Posted Date for stability
+        # Use Posted Date for stability, fall back to Transaction Date
         date_str = (row.get('Posted Date') or row.get('Transaction Date', '')).strip()
         desc = row.get('Description', '').strip()
         amt_str = row.get('Amount', '').strip()
 
         if not date_str or not amt_str or not desc:
             continue
-        try:
-            date_obj = parse_date(date_str, ['%m/%d/%Y', '%m/%d/%y', '%-m/%-d/%Y'])
-        except:
+
+        # Robust date parsing — handles M/D/YYYY, MM/DD/YYYY, M/D/YY
+        date_obj = None
+        for fmt in ['%m/%d/%Y', '%m/%d/%y', '%Y-%m-%d']:
             try:
-                # Handle M/D/YYYY without zero-padding
+                date_obj = datetime.strptime(date_str, fmt)
+                break
+            except:
+                pass
+        if date_obj is None:
+            try:
                 parts = date_str.split('/')
                 date_obj = datetime(int(parts[2]), int(parts[0]), int(parts[1]))
             except:
                 continue
+
         try:
             amount = normalize_amount(amt_str)
-            # BILT: positive = charge (expense), negative = payment/credit
-            # Flip so charges are negative (standard QFX convention)
-            if 'payment' not in desc.lower() and 'bilt rewards' not in desc.lower():
-                amount = -abs(amount) if amount > 0 else amount
+            # Credit card convention for MoneyGrit: charges positive, payments/refunds negative
+            # New BILT format already uses this convention correctly — respect the sign as-is
+            # but force payments and bilt rewards to negative just in case
+            if 'payment' in desc.lower() or 'bilt rewards' in desc.lower():
+                amount = -abs(amount)
+            # For all other transactions, keep the sign from the file (positive=charge, negative=refund)
 
-            fitid = make_fitid_hash(date_obj.strftime('%Y%m%d'), amount, desc)
+            fitid = make_fitid_hash(
+                date_obj.strftime('%Y%m%d'),
+                amount,
+                desc,
+                row.get('Raw Merchant Name', '').strip()[:20]
+            )
             rows.append({
-                'date': date_obj,
-                'amount': amount,
+                'date':        date_obj,
+                'amount':      amount,
                 'description': desc,
-                'fitid': fitid,
-                'memo': ''
+                'fitid':       fitid,
+                'memo':        row.get('Category', '').strip()
             })
         except:
             continue
@@ -463,15 +483,45 @@ def parse_capital_one(text, filename):
             continue
         try:
             date_obj = parse_date(date_str)
-            # Debit = charge (negative), Credit = payment/refund (positive)
+            # Debit = charge (positive), Credit = payment/refund (negative) — credit card convention
             if debit:
-                amount = -abs(normalize_amount(debit))
+                amount = abs(normalize_amount(debit))
             elif credit:
-                amount = abs(normalize_amount(credit))
+                amount = -abs(normalize_amount(credit))
             else:
                 continue
 
             fitid = make_fitid_hash(date_obj.strftime('%Y%m%d'), amount, desc)
+            rows.append({
+                'date':        date_obj,
+                'amount':      amount,
+                'description': desc,
+                'fitid':       fitid,
+                'memo':        row.get('Category', '').strip()
+            })
+        except:
+            continue
+    return rows
+
+
+def parse_discover(text, filename):
+    """Discover: Trans. Date, Post Date, Description, Amount, Category
+    Charges are positive, payments/credits are negative — flip signs."""
+    rows = []
+    import csv
+    lines = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+    reader = csv.DictReader(lines)
+    for row in reader:
+        date_str = (row.get('Trans. Date') or row.get('Post Date', '')).strip()
+        desc     = row.get('Description', '').strip().strip('"')
+        amt_str  = row.get('Amount', '').strip()
+        if not date_str or not amt_str or not desc:
+            continue
+        try:
+            date_obj = parse_date(date_str)
+            amount   = normalize_amount(amt_str)
+            # Discover: positive = charge, negative = payment — keep as-is for MoneyGrit credit card convention
+            fitid    = make_fitid_hash(date_obj.strftime('%Y%m%d'), amount, desc)
             rows.append({
                 'date':        date_obj,
                 'amount':      amount,
@@ -600,6 +650,7 @@ FORMAT_LABELS = {
     'wise': ('Wise', 'wise'),
     'generic': ('Generic CSV', 'unknown'),
     'capital-one': ('Capital One', 'chase'),
+    'discover':    ('Discover',    'chase'),
     'wells-fargo': ('Wells Fargo', 'wells'),
     'unknown': ('Unknown Format', 'unknown'),
 }
@@ -611,6 +662,7 @@ PARSERS = {
     'chase': parse_chase,
     'bilt': parse_bilt,
     'capital-one':  parse_capital_one,
+    'discover':     parse_discover,
     'wells-fargo':  parse_wells_fargo,
 }
 
