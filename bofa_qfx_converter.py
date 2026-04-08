@@ -191,7 +191,6 @@ def parse_bofa_cc(text, filename):
             else:
                 fitid = make_fitid_hash(date_obj.strftime('%Y%m%d'), amount, payee)
 
-            amount = -amount  # credit card: flip so charges are positive
             rows.append({
                 'date': date_obj,
                 'amount': amount,
@@ -282,13 +281,13 @@ def parse_bofa_business(text, filename):
             else:
                 fitid = make_fitid_hash(date_obj.strftime('%Y%m%d'), amount, desc)
 
-            # D=Debit(charge)=positive, C=Credit(payment)=negative (credit card convention)
+            # D=Debit(charge)=negative, C=Credit(payment)=positive (standard QFX convention)
             if txn_type == 'D':
-                amount = abs(amount)
-            elif txn_type == 'C':
                 amount = -abs(amount)
-            else:
+            elif txn_type == 'C':
                 amount = abs(amount)
+            else:
+                amount = -abs(amount)
 
             rows.append({
                 'date': date_obj,
@@ -319,7 +318,6 @@ def parse_chase(text, filename):
         try:
             date_obj = parse_date(date_str)
             amount = normalize_amount(amt_str)
-            amount = -amount  # credit card: flip so charges are positive
             fitid = make_fitid_hash(date_obj.strftime('%Y%m%d'), amount, desc)
             rows.append({
                 'date': date_obj,
@@ -368,12 +366,11 @@ def parse_bilt(text, filename):
 
         try:
             amount = normalize_amount(amt_str)
-            # Credit card convention for MoneyGrit: charges positive, payments/refunds negative
-            # New BILT format already uses this convention correctly — respect the sign as-is
-            # but force payments and bilt rewards to negative just in case
+            # Standard QFX convention: charges negative, payments positive
             if 'payment' in desc.lower() or 'bilt rewards' in desc.lower():
-                amount = -abs(amount)
-            # For all other transactions, keep the sign from the file (positive=charge, negative=refund)
+                amount = abs(amount)   # payments are positive
+            else:
+                amount = -abs(amount)  # charges are negative
 
             fitid = make_fitid_hash(
                 date_obj.strftime('%Y%m%d'),
@@ -483,11 +480,11 @@ def parse_capital_one(text, filename):
             continue
         try:
             date_obj = parse_date(date_str)
-            # Debit = charge (positive), Credit = payment/refund (negative) — credit card convention
+            # Standard QFX convention: charges negative, payments positive
             if debit:
-                amount = abs(normalize_amount(debit))
+                amount = -abs(normalize_amount(debit))
             elif credit:
-                amount = -abs(normalize_amount(credit))
+                amount = abs(normalize_amount(credit))
             else:
                 continue
 
@@ -520,7 +517,8 @@ def parse_discover(text, filename):
         try:
             date_obj = parse_date(date_str)
             amount   = normalize_amount(amt_str)
-            # Discover: positive = charge, negative = payment — keep as-is for MoneyGrit credit card convention
+            # Standard QFX convention: charges negative, payments positive — flip Discover's signs
+            amount = -amount
             fitid    = make_fitid_hash(date_obj.strftime('%Y%m%d'), amount, desc)
             rows.append({
                 'date':        date_obj,
