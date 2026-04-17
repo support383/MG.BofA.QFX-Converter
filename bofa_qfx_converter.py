@@ -366,11 +366,15 @@ def parse_bilt(text, filename):
 
         try:
             amount = normalize_amount(amt_str)
-            # Standard QFX convention: charges negative, payments positive
+            # Standard QFX convention: charges negative, payments/refunds positive
+            # BILT new format: positive = charge, negative = refund/payment
+            # We need: charges negative, refunds/payments positive
             if 'payment' in desc.lower() or 'bilt rewards' in desc.lower():
-                amount = abs(amount)   # payments are positive
+                amount = abs(amount)    # payments always positive
+            elif amount < 0:
+                amount = abs(amount)    # negative in BILT = refund = positive in QFX
             else:
-                amount = -abs(amount)  # charges are negative
+                amount = -abs(amount)   # positive in BILT = charge = negative in QFX
 
             fitid = make_fitid_hash(
                 date_obj.strftime('%Y%m%d'),
