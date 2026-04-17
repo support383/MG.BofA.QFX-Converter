@@ -669,6 +669,46 @@ PARSERS = {
 }
 
 
+
+def repair_rbc_qfx(content_bytes):
+    """RBC QFX files have unstable FITIDs that change every download.
+    Re-stamp all FITIDs with stable hashes based on date+amount+name."""
+    import re, hashlib
+    text = content_bytes.decode('latin-1')
+    
+    # Detect RBC by looking for their FITID pattern
+    if '90000010' not in text:
+        return None, "Not an RBC QFX file"
+    
+    # Fix known RBC formatting issues while we're at it
+    text = text.replace('SECURITY:TYPE1', 'SECURITY:NONE')
+    text = re.sub(r'(\d{14})\[-?\d+\]', r'\1', text)  # strip timezone offsets
+    
+    def replace_fitid(match):
+        full_txn = match.group(0)
+        date_m  = re.search(r'<DTPOSTED>(\d{8})', full_txn)
+        amt_m   = re.search(r'<TRNAMT>([\d.\-]+)', full_txn)
+        name_m  = re.search(r'<n>(.*?)(?=<|\n)', full_txn)
+        memo_m  = re.search(r'<MEMO>(.*?)(?=<|\n)', full_txn)
+        
+        date_s = date_m.group(1) if date_m else '00000000'
+        amt_s  = amt_m.group(1)  if amt_m  else '0'
+        name_s = name_m.group(1).strip() if name_m else ''
+        memo_s = memo_m.group(1).strip() if memo_m else ''
+        
+        key   = f"{date_s}|{amt_s}|{name_s[:40]}|{memo_s[:20]}"
+        fitid = hashlib.md5(key.encode()).hexdigest()[:16].upper()
+        
+        return re.sub(r'<FITID>.*?(?=<|\n)', f'<FITID>{fitid}', full_txn)
+    
+    # Replace FITIDs within each transaction
+    fixed = re.sub(r'<STMTTRN>.*?</STMTTRN>', replace_fitid, text, flags=re.DOTALL)
+    
+    # Count transactions
+    count = len(re.findall(r'<STMTTRN>', fixed))
+    return fixed.encode('utf-8'), f"{count} transactions re-stamped with stable IDs"
+
+
 # ── UI ────────────────────────────────────────────────────────────────────────────────────
 
 # Default settings (no visible settings panel)
@@ -677,53 +717,74 @@ account_id      = ""
 wise_use_source = True
 
 st.title("⇄ CSV/Excel to QFX Converter")
-st.caption("Upload a bank CSV or Excel export to convert it to QFX format for import into MoneyGrit.")
+st.caption("Upload a bank CSV or Excel export — or an RBC QFX file to fix duplicate detection.")
 st.markdown("---")
 
 uploaded = st.file_uploader(
-    "Upload a CSV/Excel file",
-    type=['csv', 'CSV', 'xls', 'xlsx'],
+    "Upload a CSV/Excel or RBC QFX file",
+    type=['csv', 'CSV', 'xls', 'xlsx', 'qfx', 'QFX'],
     accept_multiple_files=False
 )
 
 if uploaded:
     content_bytes = uploaded.read()
-    fmt, text = detect_format(uploaded.name, content_bytes)
-    label, badge_cls = FORMAT_LABELS.get(fmt, ('Unknown', 'unknown'))
 
-    if fmt == 'unknown':
-        st.error(f"⚠ Could not detect the format of {uploaded.name}. Please contact support@moneygrit.com.")
+    # RBC QFX repair path
+    if uploaded.name.lower().endswith('.qfx'):
+        fixed_bytes, msg = repair_rbc_qfx(content_bytes)
+        if fixed_bytes is None:
+            st.error(f"⚠ {msg}")
+        else:
+            st.markdown(
+                f'<div class="result-row"><span><span class="format-badge">RBC QFX</span>{uploaded.name}</span>'
+                f'<span class="txn-count">{msg}</span></div>',
+                unsafe_allow_html=True)
+            out_name = os.path.splitext(uploaded.name)[0] + "_fixed.qfx"
+            st.download_button(
+                label=f"⬇  Download {out_name}",
+                data=fixed_bytes,
+                file_name=out_name,
+                mime='application/x-ofx'
+            )
+
+    # CSV/Excel conversion path
     else:
-        try:
-            txns = parse_wise(text, uploaded.name, use_source_amount=wise_use_source) \
-                   if fmt == 'wise' else PARSERS[fmt](text, uploaded.name)
+        fmt, text = detect_format(uploaded.name, content_bytes)
+        label, badge_cls = FORMAT_LABELS.get(fmt, ('Unknown', 'unknown'))
 
-            if not txns:
-                st.error(f"⚠ No transactions found in {uploaded.name}.")
-            else:
-                st.markdown(
-                    f'<div class="result-row"><span><span class="format-badge">{label}</span>{uploaded.name}</span>'
-                    f'<span class="txn-count">{len(txns)} transactions found</span></div>',
-                    unsafe_allow_html=True)
+        if fmt == 'unknown':
+            st.error(f"⚠ Could not detect the format of {uploaded.name}. Please contact support@moneygrit.com.")
+        else:
+            try:
+                txns = parse_wise(text, uploaded.name, use_source_amount=wise_use_source) \
+                       if fmt == 'wise' else PARSERS[fmt](text, uploaded.name)
 
-                st.markdown("")
+                if not txns:
+                    st.error(f"⚠ No transactions found in {uploaded.name}.")
+                else:
+                    st.markdown(
+                        f'<div class="result-row"><span><span class="format-badge">{label}</span>{uploaded.name}</span>'
+                        f'<span class="txn-count">{len(txns)} transactions found</span></div>',
+                        unsafe_allow_html=True)
 
-                with st.expander("Preview transactions", expanded=False):
-                    preview_df = pd.DataFrame([{
-                        'Date':        t['date'].strftime('%Y-%m-%d'),
-                        'Description': t['description'],
-                        'Amount':      f"{t['amount']:+.2f}",
-                    } for t in sorted(txns, key=lambda x: x['date'], reverse=True)[:50]])
-                    st.dataframe(preview_df, use_container_width=True, hide_index=True)
+                    st.markdown("")
 
-                qfx_content = build_qfx(txns, account_id="IMPORT", currency=currency)
-                out_name = os.path.splitext(uploaded.name)[0] + ".qfx"
-                st.download_button(
-                    label=f"⬇  Download {out_name}",
-                    data=qfx_content.encode('utf-8'),
-                    file_name=out_name,
-                    mime='application/x-ofx'
-                )
+                    with st.expander("Preview transactions", expanded=False):
+                        preview_df = pd.DataFrame([{
+                            'Date':        t['date'].strftime('%Y-%m-%d'),
+                            'Description': t['description'],
+                            'Amount':      f"{t['amount']:+.2f}",
+                        } for t in sorted(txns, key=lambda x: x['date'], reverse=True)[:50]])
+                        st.dataframe(preview_df, use_container_width=True, hide_index=True)
 
-        except Exception as e:
-            st.error(f"Error converting {uploaded.name}: {e}")
+                    qfx_content = build_qfx(txns, account_id="IMPORT", currency=currency)
+                    out_name = os.path.splitext(uploaded.name)[0] + ".qfx"
+                    st.download_button(
+                        label=f"⬇  Download {out_name}",
+                        data=qfx_content.encode('utf-8'),
+                        file_name=out_name,
+                        mime='application/x-ofx'
+                    )
+
+            except Exception as e:
+                st.error(f"Error converting {uploaded.name}: {e}")
