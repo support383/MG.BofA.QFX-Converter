@@ -868,10 +868,9 @@ if uploaded:
                         file_name=out_name,
                         mime='application/x-ofx'
                     )
-
 st.markdown("""
 <div class="mg-footer">
-    <a href="https://moneygrit.com">MoneyGrit.</a> &nbsp;·&nbsp; 
-    Questions? <a href="mailto:support@moneygrit.com">support@moneygrit.com</a>
+<a href="https://moneygrit.com">MoneyGrit.</a> &nbsp;·&nbsp; 
+Questions? <a href="mailto:support@moneygrit.com">support@moneygrit.com</a>
 </div>
 """, unsafe_allow_html=True)
