@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 
 st.set_page_config(
     page_title="MoneyGrit. Bank Statement Converter",
-    page_icon="💰",
+    page_icon="https://moneygrit.com/wp-content/uploads/2026/06/MG-Favcicon.png",
     layout="centered"
 )
 
