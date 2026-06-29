@@ -3,6 +3,7 @@ import pandas as pd
 import hashlib
 import io
 import os
+import re
 from datetime import datetime, timedelta
 
 st.set_page_config(
@@ -14,51 +15,153 @@ st.set_page_config(
 # ── Styling ─────────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-[data-testid="stAppViewContainer"] { background: #ffffff !important; }
+/* Import Georgia-like serif font */
+@import url('https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,600;1,400&family=Source+Sans+3:wght@400;600&display=swap');
 
+/* Page background */
+[data-testid="stAppViewContainer"] {
+    background: #f9f7f4 !important;
+    font-family: 'Source Sans 3', sans-serif;
+}
+
+[data-testid="stHeader"] {
+    background: transparent !important;
+}
+
+/* Main content area */
+[data-testid="stMainBlockContainer"] {
+    padding-top: 2rem;
+}
+
+/* Logo/header area */
+.mg-header {
+    text-align: center;
+    padding: 2rem 0 1rem 0;
+    border-bottom: 2px solid #45668e;
+    margin-bottom: 2rem;
+}
+
+.mg-logo-text {
+    font-family: 'Lora', Georgia, serif;
+    font-size: 2rem;
+    color: #45668e;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+}
+
+.mg-logo-dot {
+    color: #45668e;
+}
+
+.mg-tagline {
+    font-family: 'Source Sans 3', sans-serif;
+    font-size: 0.9rem;
+    color: #6b7a8d;
+    margin-top: 0.25rem;
+    font-style: italic;
+}
+
+.mg-tool-title {
+    font-family: 'Lora', Georgia, serif;
+    font-size: 1.4rem;
+    color: #2c3e50;
+    margin-top: 0.5rem;
+    font-weight: 400;
+}
+
+/* Upload area styling */
+[data-testid="stFileUploader"] {
+    background: #ffffff;
+    border: 2px dashed #45668e;
+    border-radius: 10px;
+    padding: 1rem;
+}
+
+/* Download button */
 .stDownloadButton > button {
-    background: #1a6ef5 !important;
+    background: #45668e !important;
     color: #ffffff !important;
     border: none !important;
+    font-family: 'Source Sans 3', sans-serif !important;
     font-weight: 600 !important;
     font-size: 15px !important;
     border-radius: 6px !important;
     padding: 0.6rem 1.6rem !important;
     width: 100%;
     margin-top: 1rem;
+    transition: background 0.2s ease;
 }
 
+.stDownloadButton > button:hover {
+    background: #354f6e !important;
+}
+
+/* Format badge */
 .format-badge {
     display: inline-block;
-    background: #e8f0fe;
-    color: #1a6ef5;
+    background: #e8eef5;
+    color: #45668e;
     font-size: 12px;
     font-weight: 600;
     padding: 2px 10px;
     border-radius: 12px;
     margin-right: 6px;
+    font-family: 'Source Sans 3', sans-serif;
 }
 .format-badge.unknown { background: #f1f3f4; color: #5f6368; }
 
+/* Result row */
 .result-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 10px 0;
-    border-bottom: 1px solid #dadce0;
+    padding: 12px 0;
+    border-bottom: 1px solid #d8e0e8;
     font-size: 14px;
+    font-family: 'Source Sans 3', sans-serif;
 }
-.txn-count { font-weight: 600; color: #188038; }
+
+.txn-count { font-weight: 600; color: #2e7d52; }
 .txn-error { font-weight: 600; color: #c5221f; }
 
-[data-testid="stMetric"] {
-    background: #f8f9fa;
-    border: 1px solid #dadce0;
-    border-radius: 8px;
-    padding: 1rem;
+/* Footer */
+.mg-footer {
+    text-align: center;
+    margin-top: 3rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid #d8e0e8;
+    font-family: 'Source Sans 3', sans-serif;
+    font-size: 0.8rem;
+    color: #8a9ab0;
+}
+
+.mg-footer a {
+    color: #45668e;
+    text-decoration: none;
 }
 </style>
 """, unsafe_allow_html=True)
+
+
+# ── Normalization & FITID Helpers ─────────────────────────────────────────────
+
+def normalize_desc(s):
+    """Normalize description for stable FITID generation.
+    Uppercases, trims, and collapses whitespace so minor formatting
+    differences between BofA downloads don't produce different FITIDs."""
+    if not s:
+        return ''
+    s = str(s).strip().upper()
+    s = re.sub(r'\s+', ' ', s)
+    return s
+
+
+def make_fitid_hash(date_str, amount, description):
+    """Stable hash-based FITID with normalized description.
+    Normalization is applied here so ALL parsers benefit automatically.
+    No reference numbers included - they are not proven stable across BofA downloads."""
+    key = f"{date_str}|{amount:.2f}|{normalize_desc(description)[:40]}"
+    return hashlib.md5(key.encode()).hexdigest()[:16].upper()
 
 
 # ── Format Detection ──────────────────────────────────────────────────────────
@@ -66,8 +169,7 @@ st.markdown("""
 def detect_format(filename, content_bytes):
     """Returns a format string or 'unknown'."""
     fname = filename.lower()
-    
-    # Try decoding
+
     for enc in ['utf-8', 'latin-1', 'cp1252']:
         try:
             text = content_bytes.decode(enc)
@@ -79,43 +181,33 @@ def detect_format(filename, content_bytes):
 
     first_lines = text[:500]
 
-    # Wise: semicolon delimited with ID column
     if ';' in first_lines and 'ID;Status;Direction' in first_lines:
         return 'wise', text
 
-    # BofA Corporate/Business card: has CardHolder Name column
     if 'CardHolder Name' in first_lines and 'Reference ID' in first_lines:
         return 'bofa-business', text
 
-    # BofA Credit Card: Posted Date, Reference Number, Payee
     if 'Posted Date' in first_lines and 'Reference Number' in first_lines and 'Payee' in first_lines:
         return 'bofa-cc', text
 
-    # Chase: Transaction Date, Post Date, Description, Category, Type, Amount, Memo
     if 'Transaction Date' in first_lines and 'Post Date' in first_lines and 'Memo' in first_lines:
         return 'chase', text
 
-    # Capital One: has separate Debit and Credit columns
     if 'Transaction Date' in first_lines and 'Posted Date' in first_lines and 'Debit' in first_lines and 'Credit' in first_lines:
         return 'capital-one', text
 
-    # BILT: Transaction Date, Posted Date, Description, Amount (no address/running bal)
     if 'Transaction Date' in first_lines and 'Posted Date' in first_lines and 'Description' in first_lines and 'Address' not in first_lines and 'Running' not in first_lines:
         return 'bilt', text
 
-    # Discover: Trans. Date, Post Date, Description, Amount, Category
     if 'Trans. Date' in first_lines and 'Post Date' in first_lines and 'Description' in first_lines:
         return 'discover', text
 
-    # BofA Checking: Date, Description, Amount, Running Bal (with summary header)
     if 'Running Bal' in first_lines or ('Date,Description,Amount' in first_lines.replace(' ', '')):
         return 'bofa-checking', text
 
-    # Wells Fargo / generic checking fallback
     if 'Date' in first_lines and 'Amount' in first_lines:
         return 'generic', text
 
-    # Wells Fargo: no header row, 5 columns: date, amount, *, blank, description
     import csv as _csv, io as _io
     try:
         sample_rows = list(_csv.reader(_io.StringIO(text)))[:3]
@@ -139,7 +231,6 @@ def parse_date(s, formats=None):
     if not formats:
         formats = ['%m/%d/%Y', '%Y-%m-%d', '%m/%d/%y', '%d/%m/%Y', '%Y%m%d']
     s = str(s).strip()
-    # Handle datetime strings like "2026-03-20 14:18:43"
     if ' ' in s:
         s = s.split(' ')[0]
     for fmt in formats:
@@ -155,18 +246,11 @@ def normalize_amount(val):
     return float(str(val).replace(',', '').strip())
 
 
-def make_fitid_hash(date_str, amount, description, extra=''):
-    """Strict hash-based FITID."""
-    key = f"{date_str}|{amount:.2f}|{description[:40]}|{extra}"
-    return hashlib.md5(key.encode()).hexdigest()[:16].upper()
-
-
 def parse_bofa_cc(text, filename):
     """BofA Credit Card: Posted Date, Reference Number, Payee, Address, Amount"""
     rows = []
-    # Handle \r\r\n (double CRLF)
     lines = text.replace('\r\r\n', '\n').replace('\r\n', '\n').replace('\r', '\n').split('\n')
-    
+
     header_idx = None
     for i, line in enumerate(lines):
         if line.startswith('Posted Date') and 'Reference Number' in line:
@@ -186,10 +270,14 @@ def parse_bofa_cc(text, filename):
             payee = row.get('Payee', '').strip().strip('"')
             ref = row.get('Reference Number', '').strip()
 
-            if ref and len(ref) > 5:
-                fitid = ref[:22]
-            else:
-                fitid = make_fitid_hash(date_obj.strftime('%Y%m%d'), amount, payee)
+            # FITID: hash of date + amount + normalized payee only.
+            # Reference numbers are NOT included - BofA has not proven
+            # them stable across current vs statement downloads.
+            fitid = make_fitid_hash(
+                date_obj.strftime('%Y%m%d'),
+                amount,
+                payee
+            )
 
             rows.append({
                 'date': date_obj,
@@ -198,13 +286,13 @@ def parse_bofa_cc(text, filename):
                 'fitid': fitid,
                 'memo': row.get('Address', '').strip()
             })
-        except Exception as e:
+        except Exception:
             continue
     return rows
 
 
 def parse_bofa_checking(text, filename):
-    """BofA Checking: Date, Description, Amount, Running Bal. (with summary header block)"""
+    """BofA Checking: Date, Description, Amount, Running Bal."""
     rows = []
     lines = text.replace('\r\r\n', '\n').replace('\r\n', '\n').replace('\r', '\n').split('\n')
 
@@ -233,6 +321,7 @@ def parse_bofa_checking(text, filename):
         try:
             date_obj = parse_date(date_str)
             amount = normalize_amount(amt_str)
+            # normalize_desc() is applied inside make_fitid_hash()
             fitid = make_fitid_hash(date_obj.strftime('%Y%m%d'), amount, desc)
             rows.append({
                 'date': date_obj,
@@ -247,7 +336,7 @@ def parse_bofa_checking(text, filename):
 
 
 def parse_bofa_business(text, filename):
-    """BofA Business/Corporate card: CardHolder Name, Account/Card Number, Posting Date, Trans. Date, Reference ID, Description, Amount..."""
+    """BofA Business/Corporate card: CardHolder Name, Posting Date, Reference ID, Description, Amount"""
     rows = []
     lines = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
 
@@ -273,21 +362,27 @@ def parse_bofa_business(text, filename):
             date_obj = parse_date(date_str)
             amount = normalize_amount(amt_str)
             txn_type = row.get('Transaction Type', '').strip().upper()
+
             # Strip "Ref: " prefix
             if ref.startswith('Ref:'):
                 ref = ref[4:].strip()
-            if ref and len(ref) > 5:
-                fitid = ref[:22]
-            else:
-                fitid = make_fitid_hash(date_obj.strftime('%Y%m%d'), amount, desc)
 
-            # D=Debit(charge)=negative, C=Credit(payment)=positive (standard QFX convention)
+            # Apply sign BEFORE generating FITID so the hash
+            # matches the actual QFX transaction amount
             if txn_type == 'D':
                 amount = -abs(amount)
             elif txn_type == 'C':
                 amount = abs(amount)
             else:
                 amount = -abs(amount)
+
+            # FITID: hash of date + signed amount + normalized description.
+            # No reference number - not proven stable across BofA downloads.
+            fitid = make_fitid_hash(
+                date_obj.strftime('%Y%m%d'),
+                amount,
+                desc
+            )
 
             rows.append({
                 'date': date_obj,
@@ -332,16 +427,13 @@ def parse_chase(text, filename):
 
 
 def parse_bilt(text, filename):
-    """BILT: Transaction Date, Posted Date, Description, Amount
-    Supports old format (4 cols) and new format (7 cols with Card Last 4 etc.)
-    New format: charges positive, payments negative — already correct for MoneyGrit credit card convention."""
+    """BILT Rewards card"""
     rows = []
     lines = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
 
     import csv
     reader = csv.DictReader(lines)
     for row in reader:
-        # Use Posted Date for stability, fall back to Transaction Date
         date_str = (row.get('Posted Date') or row.get('Transaction Date', '')).strip()
         desc = row.get('Description', '').strip()
         amt_str = row.get('Amount', '').strip()
@@ -349,7 +441,6 @@ def parse_bilt(text, filename):
         if not date_str or not amt_str or not desc:
             continue
 
-        # Robust date parsing — handles M/D/YYYY, MM/DD/YYYY, M/D/YY
         date_obj = None
         for fmt in ['%m/%d/%Y', '%m/%d/%y', '%Y-%m-%d']:
             try:
@@ -366,28 +457,24 @@ def parse_bilt(text, filename):
 
         try:
             amount = normalize_amount(amt_str)
-            # Standard QFX convention: charges negative, payments/refunds positive
-            # BILT new format: positive = charge, negative = refund/payment
-            # We need: charges negative, refunds/payments positive
             if 'payment' in desc.lower() or 'bilt rewards' in desc.lower():
-                amount = abs(amount)    # payments always positive
+                amount = abs(amount)
             elif amount < 0:
-                amount = abs(amount)    # negative in BILT = refund = positive in QFX
+                amount = abs(amount)
             else:
-                amount = -abs(amount)   # positive in BILT = charge = negative in QFX
+                amount = -abs(amount)
 
             fitid = make_fitid_hash(
                 date_obj.strftime('%Y%m%d'),
                 amount,
-                desc,
-                row.get('Raw Merchant Name', '').strip()[:20]
+                desc
             )
             rows.append({
-                'date':        date_obj,
-                'amount':      amount,
+                'date': date_obj,
+                'amount': amount,
                 'description': desc,
-                'fitid':       fitid,
-                'memo':        row.get('Category', '').strip()
+                'fitid': fitid,
+                'memo': row.get('Category', '').strip()
             })
         except:
             continue
@@ -395,19 +482,17 @@ def parse_bilt(text, filename):
 
 
 def parse_wise(text, filename, use_source_amount=True):
-    """Wise: semicolon-delimited with ID, Status, Direction, amounts in source/target currencies"""
+    """Wise: semicolon-delimited"""
     rows = []
     import csv
     reader = csv.DictReader(io.StringIO(text), delimiter=';')
-    
+
     for row in reader:
         txn_id = row.get('ID', '').strip()
         status = row.get('Status', '').strip().upper()
         direction = row.get('Direction', '').strip().upper()
-        
-        # Skip zero-value refunded/cancelled (they're noise)
+
         if status == 'CANCELLED':
-            # still include if non-zero
             src_amt = row.get('Source amount (after fees)', '').strip()
             if not src_amt or src_amt == '0' or src_amt == '0.00':
                 continue
@@ -421,13 +506,11 @@ def parse_wise(text, filename, use_source_amount=True):
         except:
             continue
 
-        # Merchant name
         if direction == 'IN':
             merchant = row.get('Source name', '').strip() or 'Transfer In'
         else:
             merchant = row.get('Target name', '').strip() or 'Transfer Out'
 
-        # Amount selection
         try:
             if use_source_amount:
                 amt_str = row.get('Source amount (after fees)', '').strip()
@@ -442,13 +525,11 @@ def parse_wise(text, filename, use_source_amount=True):
         except:
             continue
 
-        # Apply sign: OUT = negative (expense), IN = positive (income/refund)
         if direction == 'OUT':
             amount = -abs(amount)
         else:
             amount = abs(amount)
 
-        # FITID: use the unique Wise transaction ID directly
         fitid = txn_id.replace('-', '')[:22]
         if not fitid:
             fitid = make_fitid_hash(date_obj.strftime('%Y%m%d'), amount, merchant)
@@ -476,15 +557,14 @@ def parse_capital_one(text, filename):
     reader = csv.DictReader(lines)
     for row in reader:
         date_str = (row.get('Posted Date') or row.get('Transaction Date', '')).strip()
-        desc     = row.get('Description', '').strip()
-        debit    = row.get('Debit', '').strip()
-        credit   = row.get('Credit', '').strip()
+        desc = row.get('Description', '').strip()
+        debit = row.get('Debit', '').strip()
+        credit = row.get('Credit', '').strip()
 
         if not date_str or not desc:
             continue
         try:
             date_obj = parse_date(date_str)
-            # Standard QFX convention: charges negative, payments positive
             if debit:
                 amount = -abs(normalize_amount(debit))
             elif credit:
@@ -494,11 +574,11 @@ def parse_capital_one(text, filename):
 
             fitid = make_fitid_hash(date_obj.strftime('%Y%m%d'), amount, desc)
             rows.append({
-                'date':        date_obj,
-                'amount':      amount,
+                'date': date_obj,
+                'amount': amount,
                 'description': desc,
-                'fitid':       fitid,
-                'memo':        row.get('Category', '').strip()
+                'fitid': fitid,
+                'memo': row.get('Category', '').strip()
             })
         except:
             continue
@@ -506,30 +586,28 @@ def parse_capital_one(text, filename):
 
 
 def parse_discover(text, filename):
-    """Discover: Trans. Date, Post Date, Description, Amount, Category
-    Charges are positive, payments/credits are negative — flip signs."""
+    """Discover: Trans. Date, Post Date, Description, Amount, Category"""
     rows = []
     import csv
     lines = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
     reader = csv.DictReader(lines)
     for row in reader:
         date_str = (row.get('Trans. Date') or row.get('Post Date', '')).strip()
-        desc     = row.get('Description', '').strip().strip('"')
-        amt_str  = row.get('Amount', '').strip()
+        desc = row.get('Description', '').strip().strip('"')
+        amt_str = row.get('Amount', '').strip()
         if not date_str or not amt_str or not desc:
             continue
         try:
             date_obj = parse_date(date_str)
-            amount   = normalize_amount(amt_str)
-            # Standard QFX convention: charges negative, payments positive — flip Discover's signs
-            amount = -amount
-            fitid    = make_fitid_hash(date_obj.strftime('%Y%m%d'), amount, desc)
+            amount = normalize_amount(amt_str)
+            amount = -amount  # flip Discover's signs
+            fitid = make_fitid_hash(date_obj.strftime('%Y%m%d'), amount, desc)
             rows.append({
-                'date':        date_obj,
-                'amount':      amount,
+                'date': date_obj,
+                'amount': amount,
                 'description': desc,
-                'fitid':       fitid,
-                'memo':        row.get('Category', '').strip()
+                'fitid': fitid,
+                'memo': row.get('Category', '').strip()
             })
         except:
             continue
@@ -537,7 +615,7 @@ def parse_discover(text, filename):
 
 
 def parse_wells_fargo(text, filename):
-    """Wells Fargo checking: no header, columns are date, amount, *, blank, description"""
+    """Wells Fargo: no header, columns are date, amount, *, blank, description"""
     rows = []
     import csv
     reader = csv.reader(text.splitlines())
@@ -546,17 +624,17 @@ def parse_wells_fargo(text, filename):
             continue
         try:
             date_obj = parse_date(row[0].strip())
-            amount   = normalize_amount(row[1].strip())
-            desc     = row[4].strip()
+            amount = normalize_amount(row[1].strip())
+            desc = row[4].strip()
             if not desc:
                 continue
             fitid = make_fitid_hash(date_obj.strftime('%Y%m%d'), amount, desc)
             rows.append({
-                'date':        date_obj,
-                'amount':      amount,
+                'date': date_obj,
+                'amount': amount,
                 'description': desc,
-                'fitid':       fitid,
-                'memo':        ''
+                'fitid': fitid,
+                'memo': ''
             })
         except:
             continue
@@ -643,81 +721,86 @@ def build_qfx(transactions, account_id="UNKNOWN", bank_id="000000000", currency=
     return '\n'.join(lines)
 
 
+# ── Format Labels & Parser Registry ──────────────────────────────────────────
+
 FORMAT_LABELS = {
-    'bofa-cc': ('BofA Credit Card', 'bofa-cc'),
-    'bofa-checking': ('BofA Checking', 'bofa-chk'),
-    'bofa-business': ('BofA Business Card', 'bofa-chk'),
-    'chase': ('Chase', 'chase'),
-    'bilt': ('BILT Rewards', 'bilt'),
-    'wise': ('Wise', 'wise'),
-    'generic': ('Generic CSV', 'unknown'),
-    'capital-one': ('Capital One', 'chase'),
-    'discover':    ('Discover',    'chase'),
-    'wells-fargo': ('Wells Fargo', 'wells'),
-    'unknown': ('Unknown Format', 'unknown'),
+    'bofa-cc':       ('BofA Credit Card',   'bofa-cc'),
+    'bofa-checking': ('BofA Checking',       'bofa-chk'),
+    'bofa-business': ('BofA Business Card',  'bofa-chk'),
+    'chase':         ('Chase',               'chase'),
+    'bilt':          ('BILT Rewards',        'bilt'),
+    'wise':          ('Wise',                'wise'),
+    'generic':       ('Generic CSV',         'unknown'),
+    'capital-one':   ('Capital One',         'chase'),
+    'discover':      ('Discover',            'chase'),
+    'wells-fargo':   ('Wells Fargo',         'wells'),
+    'unknown':       ('Unknown Format',      'unknown'),
 }
 
 PARSERS = {
-    'bofa-cc': parse_bofa_cc,
+    'bofa-cc':       parse_bofa_cc,
     'bofa-checking': parse_bofa_checking,
     'bofa-business': parse_bofa_business,
-    'chase': parse_chase,
-    'bilt': parse_bilt,
-    'capital-one':  parse_capital_one,
-    'discover':     parse_discover,
-    'wells-fargo':  parse_wells_fargo,
+    'chase':         parse_chase,
+    'bilt':          parse_bilt,
+    'capital-one':   parse_capital_one,
+    'discover':      parse_discover,
+    'wells-fargo':   parse_wells_fargo,
 }
 
 
+# ── RBC QFX Repair ────────────────────────────────────────────────────────────
 
 def repair_rbc_qfx(content_bytes):
     """RBC QFX files have unstable FITIDs that change every download.
     Re-stamp all FITIDs with stable hashes based on date+amount+name."""
-    import re, hashlib
+    import re
     text = content_bytes.decode('latin-1')
-    
-    # Detect RBC by looking for their FITID pattern
+
     if '90000010' not in text:
         return None, "Not an RBC QFX file"
-    
-    # Fix known RBC formatting issues while we're at it
+
     text = text.replace('SECURITY:TYPE1', 'SECURITY:NONE')
-    text = re.sub(r'(\d{14})\[-?\d+\]', r'\1', text)  # strip timezone offsets
-    
+    text = re.sub(r'(\d{14})\[-?\d+\]', r'\1', text)
+
     def replace_fitid(match):
         full_txn = match.group(0)
-        date_m  = re.search(r'<DTPOSTED>(\d{8})', full_txn)
-        amt_m   = re.search(r'<TRNAMT>([\d.\-]+)', full_txn)
-        name_m  = re.search(r'<n>(.*?)(?=<|\n)', full_txn)
-        memo_m  = re.search(r'<MEMO>(.*?)(?=<|\n)', full_txn)
-        
+        date_m = re.search(r'<DTPOSTED>(\d{8})', full_txn)
+        amt_m  = re.search(r'<TRNAMT>([\d.\-]+)', full_txn)
+        name_m = re.search(r'<NAME>(.*?)(?=<|\n)', full_txn)
+        memo_m = re.search(r'<MEMO>(.*?)(?=<|\n)', full_txn)
+
         date_s = date_m.group(1) if date_m else '00000000'
         amt_s  = amt_m.group(1)  if amt_m  else '0'
         name_s = name_m.group(1).strip() if name_m else ''
         memo_s = memo_m.group(1).strip() if memo_m else ''
-        
-        key   = f"{date_s}|{amt_s}|{name_s[:40]}|{memo_s[:20]}"
+
+        key   = f"{date_s}|{amt_s}|{normalize_desc(name_s)[:40]}"
         fitid = hashlib.md5(key.encode()).hexdigest()[:16].upper()
-        
+
         return re.sub(r'<FITID>.*?(?=<|\n)', f'<FITID>{fitid}', full_txn)
-    
-    # Replace FITIDs within each transaction
+
     fixed = re.sub(r'<STMTTRN>.*?</STMTTRN>', replace_fitid, text, flags=re.DOTALL)
-    
-    # Count transactions
     count = len(re.findall(r'<STMTTRN>', fixed))
     return fixed.encode('utf-8'), f"{count} transactions re-stamped with stable IDs"
 
 
-# ── UI ────────────────────────────────────────────────────────────────────────────────────
+# ── UI ────────────────────────────────────────────────────────────────────────
 
-# Default settings (no visible settings panel)
 currency        = "USD"
 account_id      = ""
 wise_use_source = True
 
-st.title("⇄ CSV/Excel to QFX Converter")
-st.caption("Upload a bank CSV or Excel export — or an RBC QFX file to fix duplicate detection.")
+# MoneyGrit branded header
+st.markdown("""
+<div class="mg-header">
+    <div class="mg-logo-text">MoneyGrit<span class="mg-logo-dot">.</span></div>
+    <div class="mg-tagline">Know your numbers. Own your life.</div>
+    <div class="mg-tool-title">Bank Statement Converter</div>
+</div>
+""", unsafe_allow_html=True)
+
+st.markdown("Upload your bank CSV or Excel export to convert it to QFX format for import into MoneyGrit.")
 st.markdown("---")
 
 uploaded = st.file_uploader(
@@ -786,5 +869,9 @@ if uploaded:
                         mime='application/x-ofx'
                     )
 
-            except Exception as e:
-                st.error(f"Error converting {uploaded.name}: {e}")
+st.markdown("""
+<div class="mg-footer">
+    <a href="https://moneygrit.com">MoneyGrit.</a> &nbsp;·&nbsp; 
+    Questions? <a href="mailto:support@moneygrit.com">support@moneygrit.com</a>
+</div>
+""", unsafe_allow_html=True)
