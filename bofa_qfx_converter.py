@@ -626,7 +626,6 @@ wise_use_source = True
 st.markdown("""
 <div class="mg-header">
     <div class="mg-logo-text">MoneyGrit.</div>
-    <div class="mg-tagline">Know your numbers. Own your life.</div>
     <div class="mg-tool-title">Bank Statement Converter</div>
 </div>
 """, unsafe_allow_html=True)
