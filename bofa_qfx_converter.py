@@ -138,6 +138,8 @@ def detect_format(filename, content_bytes):
         return 'bilt', text
     if 'Trans. Date' in first_lines and 'Post Date' in first_lines and 'Description' in first_lines:
         return 'discover', text
+    if 'Credit Debit Indicator' in first_lines and 'Posting Date' in first_lines:
+        return 'navy-federal', text
     if 'Current balance' in first_lines and 'Status' in first_lines and 'Type' in first_lines:
         return 'sofi', text
     if 'Running Bal' in first_lines or ('Date,Description,Amount' in first_lines.replace(' ', '')):
@@ -182,6 +184,44 @@ def normalize_amount(val):
     return float(str(val).replace(',', '').strip())
 
 
+def parse_navy_federal(text, filename):
+    """Navy Federal Credit Union: Posting Date, Transaction Date, Amount,
+    Credit Debit Indicator, Description. Works for both checking and credit cards."""
+    rows = []
+    import csv
+    lines = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+    reader = csv.DictReader(lines)
+    for row in reader:
+        date_str = (row.get('Posting Date') or row.get('Transaction Date', '')).strip()
+        desc     = row.get('Description', '').strip()
+        amt_str  = row.get('Amount', '').strip()
+        indicator = row.get('Credit Debit Indicator', '').strip().lower()
+
+        if not date_str or not amt_str or not desc:
+            continue
+        try:
+            date_obj = parse_date(date_str)
+            amount   = normalize_amount(amt_str)
+
+            # Apply sign based on Credit Debit Indicator
+            if 'debit' in indicator:
+                amount = -abs(amount)
+            else:
+                amount = abs(amount)
+
+            fitid = make_fitid_hash(date_obj.strftime('%Y%m%d'), amount, desc)
+            rows.append({
+                'date':        date_obj,
+                'amount':      amount,
+                'description': desc,
+                'fitid':       fitid,
+                'memo':        row.get('Category', '').strip()
+            })
+        except:
+            continue
+    return rows
+
+
 def parse_sofi(text, filename):
     """SoFi: Date, Description, Type, Amount, Current balance, Status"""
     rows = []
@@ -194,7 +234,6 @@ def parse_sofi(text, filename):
         amt_str  = row.get('Amount', '').strip()
         status   = row.get('Status', '').strip().lower()
 
-        # Only import posted transactions
         if status and status != 'posted':
             continue
         if not date_str or not amt_str or not desc:
@@ -202,7 +241,6 @@ def parse_sofi(text, filename):
         try:
             date_obj = parse_date(date_str)
             amount   = normalize_amount(amt_str)
-            # Amounts already signed correctly in SoFi exports
             fitid    = make_fitid_hash(date_obj.strftime('%Y%m%d'), amount, desc)
             rows.append({
                 'date':        date_obj,
@@ -596,6 +634,7 @@ def build_qfx(transactions, account_id="UNKNOWN", bank_id="000000000", currency=
 # ── Format Labels & Parser Registry ──────────────────────────────────────────
 
 FORMAT_LABELS = {
+    'navy-federal':  ('Navy Federal',        'navy'),
     'sofi':          ('SoFi',                'sofi'),
     'bofa-cc':       ('BofA Credit Card',    'bofa-cc'),
     'bofa-checking': ('BofA Checking',       'bofa-chk'),
@@ -611,6 +650,7 @@ FORMAT_LABELS = {
 }
 
 PARSERS = {
+    'navy-federal':  parse_navy_federal,
     'sofi':          parse_sofi,
     'bofa-cc':       parse_bofa_cc,
     'bofa-checking': parse_bofa_checking,
